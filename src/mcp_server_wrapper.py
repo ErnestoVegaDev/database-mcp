@@ -1,5 +1,7 @@
 from mcp.server import MCPServer as SDKMCPServer
 
+from infrastructure.mcp_server.tools import QueryTools
+
 
 class MCPServerWrapper:
     """Wrapper class for the Database MCP server.
@@ -25,6 +27,9 @@ class MCPServerWrapper:
         def add(a: int, b: int) -> int:
             """Add two numbers."""
             return a + b
+
+        # Query tools are a separate group; register them on the same server.
+        QueryTools().register(self.mcp)
 
     def _register_resources(self) -> None:
         """Register MCP resources."""
