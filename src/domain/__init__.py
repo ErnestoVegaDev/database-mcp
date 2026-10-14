@@ -1,8 +1,7 @@
-"""Domain layer: interfaces, enumerations, and value objects."""
+"""Domain layer: enumerations, errors, and value objects."""
 
 from .enums import ColumnType
 from .errors import DomainError, NotFoundError, ValidationError, ValidationErrors
-from .interfaces import Repository
 from .value_objects import Pagination, Record, ResultSet
 
 __all__ = [
@@ -11,7 +10,6 @@ __all__ = [
     "NotFoundError",
     "Pagination",
     "Record",
-    "Repository",
     "ResultSet",
     "ValidationError",
     "ValidationErrors",

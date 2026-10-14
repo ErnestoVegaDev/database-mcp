@@ -2,14 +2,18 @@
 
 from abc import ABC, abstractmethod
 
-from ..value_objects import Filter, Pagination, Record, ResultSet
+from domain.errors import DomainError
+from domain.value_objects import Filter, Pagination, Record, ResultSet
+from returns.result import Result
 
 
 class Repository(ABC):
-    """Read-only data access contract for the domain.
+    """Read-only data access contract.
 
     Implementations live in the infrastructure layer and translate these
-    calls into a concrete database. The domain only ever sees domain types.
+    calls into a concrete database. Every method returns a ``Result``: an
+    expected failure (missing table or schema, rejected request) comes back
+    as ``Failure(DomainError)``, while a genuine bug still raises.
     """
 
     @abstractmethod
@@ -17,7 +21,7 @@ class Repository(ABC):
         self,
         pagination: Pagination,
         schema: str | None = None,
-    ) -> ResultSet:
+    ) -> Result[ResultSet, DomainError]:
         """Return one page of the table catalog.
 
         Result columns: table_schema (TEXT), table_name (TEXT), table_type (TEXT).
@@ -39,7 +43,7 @@ class Repository(ABC):
         columns: tuple[str, ...],
         schema: str | None = None,
         filters: Filter = Filter(),
-    ) -> ResultSet:
+    ) -> Result[ResultSet, DomainError]:
         """Return one page of a table, projected to ``columns``.
 
         The returned ResultSet declares the ColumnType of every projected
@@ -61,10 +65,11 @@ class Repository(ABC):
         key_column: str,
         key_value: object,
         schema: str | None = None,
-    ) -> Record | None:
+    ) -> Result[Record, DomainError]:
         """Return the single row whose ``key_column`` equals ``key_value``.
 
-        Returns ``None`` when no row matches.
+        A missing row is an expected outcome, not a bug: it comes back as
+        ``Failure(NotFoundError)``.
 
         Args:
             table: Table name to query.

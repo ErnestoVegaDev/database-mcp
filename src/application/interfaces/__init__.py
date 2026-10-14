@@ -1,4 +1,4 @@
-"""Domain interfaces (ports)."""
+"""Application interfaces (ports)."""
 
 from .repository import Repository
 
