@@ -1,8 +1,45 @@
 """MCP tools that expose read-only query capabilities."""
 
 from mcp.server import MCPServer
+from returns.result import Failure
 
 from application.dtos import TableCatalogQuery
+from application.interfaces import Repository
+from application.use_cases import GetTableCatalog
+from domain.errors import DomainError, NotFoundError, ValidationError, ValidationErrors
+from domain.value_objects import ResultSet
+
+
+def _serialize_result_set(result_set: ResultSet) -> dict:
+    """Flatten a ResultSet into JSON-safe primitives for the wire.
+
+    Domain value objects (Mapping-based, non-serializable) never cross the
+    MCP boundary themselves; they become plain dicts here.
+    """
+    return {
+        "columns": {
+            name: column_type.value for name, column_type in result_set.columns.items()
+        },
+        "records": [dict(record.values) for record in result_set.records],
+    }
+
+
+def _describe_error(error: DomainError) -> dict:
+    """Render a DomainError as a discriminated, JSON-safe payload."""
+    payload: dict = {"type": type(error).__name__, "message": str(error)}
+
+    if isinstance(error, ValidationErrors):
+        payload["errors"] = [
+            {"field": item.field, "message": item.message} for item in error.errors
+        ]
+    elif isinstance(error, ValidationError):
+        payload["field"] = error.field
+
+    if isinstance(error, NotFoundError):
+        payload["entity"] = error.entity
+        payload["key"] = error.key
+
+    return payload
 
 
 class QueryTools:
@@ -11,12 +48,28 @@ class QueryTools:
     Every public method here is a candidate MCP tool. The SDK validates the
     received arguments against the method signature before the body runs, so
     a DTO parameter arrives as a real, validated instance of that DTO.
+
+    The boundary job is narrow: call the use case and translate its Result
+    into a JSON-serializable payload. The tool never builds domain objects or
+    inspects the database directly.
+
+    Error contract:
+        - Expected failures are values, not exceptions. The use case returns
+          ``Failure(DomainError)`` and the tool renders it as a structured
+          payload the caller can act on.
+        - Unexpected exceptions (bugs, driver failures) are deliberately NOT
+          caught here. The SDK's tool boundary owns them: it logs the traceback
+          server-side, keeps the internal message away from the client, and
+          returns ``is_error=True``. Adding a local try/except would duplicate
+          that boundary and misreport a crash as a normal, ``is_error=False``
+          result.
+        - Anticipatable technical failures (e.g. the database being down) are
+          mapped to a ``DomainError`` inside the persistence adapter, turning
+          them into expected failures instead of crashes.
     """
 
-    def __init__(self) -> None:
-        # The repository port is injected here once the persistence adapter
-        # exists; the current implementations return mock data.
-        pass
+    def __init__(self, repository: Repository) -> None:
+        self._get_table_catalog = GetTableCatalog(repository)
 
     def register(self, mcp: MCPServer) -> None:
         """Register this group's tools on the MCP server.
@@ -29,34 +82,14 @@ class QueryTools:
     async def get_table_catalog(self, query: TableCatalogQuery) -> dict:
         """Return one page of the table catalog.
 
-        MOCK: there is no database yet. The response echoes the received DTO
-        so the input flow can be verified end to end, and returns a fixed
-        page shaped like the future ResultSet.
+        Success carries the requested page; an expected failure (invalid
+        input, unknown schema) comes back as a structured error payload
+        instead of an exception.
         """
-        return {
-            "received_query": {
-                "schema": query.schema,
-                "page": query.page,
-                "page_size": query.page_size,
-            },
-            "columns": {
-                "table_schema": "text",
-                "table_name": "text",
-                "table_type": "text",
-            },
-            "records": [
-                {
-                    "table_schema": query.schema or "public",
-                    "table_name": "users",
-                    "table_type": "BASE TABLE",
-                },
-                {
-                    "table_schema": query.schema or "public",
-                    "table_name": "orders",
-                    "table_type": "BASE TABLE",
-                },
-            ],
-        }
+        result = await self._get_table_catalog.execute(query)
+        if isinstance(result, Failure):
+            return {"status": "error", "error": _describe_error(result.failure())}
+        return {"status": "ok", **_serialize_result_set(result.unwrap())}
 
     async def get_list_records(self, table: str, limit: int = 20) -> list[dict]:
         """List records from a table (not registered yet)."""

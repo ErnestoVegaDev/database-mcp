@@ -1,6 +1,7 @@
 from mcp.server import MCPServer as SDKMCPServer
 
 from infrastructure.mcp_server.tools import QueryTools
+from infrastructure.persistence.mock_repository import MockRepository
 
 
 class MCPServerWrapper:
@@ -22,14 +23,10 @@ class MCPServerWrapper:
 
     def _register_tools(self) -> None:
         """Register MCP tools."""
-
-        @self.mcp.tool()
-        def add(a: int, b: int) -> int:
-            """Add two numbers."""
-            return a + b
-
         # Query tools are a separate group; register them on the same server.
-        QueryTools().register(self.mcp)
+        # MockRepository is a temporary stand-in for the SQL adapter; replace
+        # it here (composition root) and nothing else in the flow changes.
+        QueryTools(MockRepository()).register(self.mcp)
 
     def _register_resources(self) -> None:
         """Register MCP resources."""
