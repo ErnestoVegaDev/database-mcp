@@ -3,9 +3,9 @@
 from mcp.server import MCPServer
 from returns.result import Failure
 
-from application.dtos import TableCatalogQuery
+from application.dtos import ListRecordsQuery, TableCatalogQuery
 from application.interfaces import Repository
-from application.use_cases import GetTableCatalog
+from application.use_cases import GetListRecords, GetTableCatalog
 from domain.errors import DomainError, NotFoundError, ValidationError, ValidationErrors
 from domain.value_objects import ResultSet
 
@@ -69,15 +69,19 @@ class QueryTools:
     """
 
     def __init__(self, repository: Repository) -> None:
+        # One injected port feeds both use cases: the tools differ in the DTO
+        # and the use case they call, not in where their data comes from.
         self._get_table_catalog = GetTableCatalog(repository)
+        self._get_list_records = GetListRecords(repository)
 
     def register(self, mcp: MCPServer) -> None:
         """Register this group's tools on the MCP server.
 
-        Only get_table_catalog is wired for now; the other methods stay
-        unregistered until their DTOs are designed.
+        get_table_catalog and get_list_records are wired; get_record stays
+        unregistered until its DTO is designed.
         """
         mcp.add_tool(self.get_table_catalog)
+        mcp.add_tool(self.get_list_records)
 
     async def get_table_catalog(self, query: TableCatalogQuery) -> dict:
         """Return one page of the table catalog.
@@ -91,9 +95,17 @@ class QueryTools:
             return {"status": "error", "error": _describe_error(result.failure())}
         return {"status": "ok", **_serialize_result_set(result.unwrap())}
 
-    async def get_list_records(self, table: str, limit: int = 20) -> list[dict]:
-        """List records from a table (not registered yet)."""
-        ...
+    async def get_list_records(self, query: ListRecordsQuery) -> dict:
+        """Return one page of a filtered, projected table.
+
+        Success carries the requested page; an expected failure (invalid input,
+        unknown table or column) comes back as a structured error payload
+        instead of an exception.
+        """
+        result = await self._get_list_records.execute(query)
+        if isinstance(result, Failure):
+            return {"status": "error", "error": _describe_error(result.failure())}
+        return {"status": "ok", **_serialize_result_set(result.unwrap())}
 
     async def get_record(self, table: str, limit: int = 20) -> dict:
         """Return one record from a table (not registered yet)."""
