@@ -4,8 +4,8 @@
 
 Early-stage Python **MCP server** built on the official MCP Python SDK v2.3.0. Despite the
 repository name, there is **no database integration yet**: the persistence layer is a session
-factory plus an in-memory `MockRepository` stand-in, and the registered tool serves data through
-an application use case instead of a SQL adapter.
+factory plus an in-memory `MockRepository` stand-in, and the registered tools serve data through
+application use cases instead of a SQL adapter.
 
 The code follows a layered `src/` layout (`domain` / `application` / `infrastructure`) with
 the MCP edge in `src/infrastructure/mcp_server/`. The entry point is `__main__.py`.
@@ -28,15 +28,16 @@ src/domain/                          pure domain; imports nothing outside itself
   errors/                            DomainError, NotFoundError, ValidationError(s) — expected failures
   value_objects/                     Filter, FilterCriterion, Pagination, Record, ResultSet
 src/application/
-  dtos/                              TableCatalogQuery, ListRecordsQuery (frozen dataclasses)
+  dtos/                              TableCatalogQuery, ListRecordsQuery, FilterCriterionQuery (pydantic dataclasses)
   interfaces/repository.py           Repository (ABC) — read-only port, 3 async methods returning Result
   use_cases/get_table_catalog.py     GetTableCatalog — validate, paginate, ask the port for a page
-  validators/                        TableCatalogQueryValidator — input rules checked before the domain
+  use_cases/get_list_records.py      GetListRecords — validate, translate filters, ask the port for a page
+  validators/                        TableCatalogQueryValidator, ListRecordsQueryValidator — input rules checked before the domain
 src/infrastructure/
   persistence/db_context.py          DbContext — async SQLAlchemy engine + async_sessionmaker
   persistence/db_context_options.py  DbContextOptions + fluent builder (MCP_DB_* env vars)
-  persistence/mock_repository.py     MockRepository — in-memory stand-in that implements the port
-  mcp_server/tools/query_tools.py    QueryTools — MCP tool group (get_table_catalog)
+  persistence/mock_repository.py     MockRepository — in-memory stand-in that implements the port and the filter operators
+  mcp_server/tools/query_tools.py    QueryTools — MCP tool group (get_table_catalog, get_list_records)
   mcp_server/middlewares/            empty
 ```
 
@@ -60,11 +61,20 @@ reaches persistence, so the domain layer holds only pure domain types.
   decorators (`@self.mcp.resource("greeting://{name}")`), while a tool group registers itself
   through `mcp.add_tool(self.get_table_catalog)` inside `QueryTools.register`. A tool group is
   unreachable unless `MCPServerWrapper` registers it during construction. Currently registered:
-  tool `get_table_catalog`; resource `greeting://{name}`. No prompts (the `_register_prompts`
-  block is commented out).
+  tools `get_table_catalog` and `get_list_records`; resource `greeting://{name}`. No prompts (the
+  `_register_prompts` block is commented out).
 - **Tool schemas are derived from the method signature** (a Pydantic `arg_model`, one field
   per parameter). A dataclass-typed parameter becomes a **nested object** whose wrapper key
   is **required**: the client must send `{"query": {...}}`, not flattened fields.
+- **Boundary DTOs are strict pydantic dataclasses:**
+  `pydantic.dataclasses.dataclass(frozen=True, slots=True, config=ConfigDict(extra="forbid"))`.
+  `extra="forbid"` is not cosmetic — pydantic silently DROPS an unknown key by default, so a
+  mistyped filter key would return **unfiltered** rows with no error at all. With it the SDK
+  rejects extras as a `ToolError` naming the path (`query.filters.0.bogus`). Two consequences:
+  `FilterCriterionQuery.value` is typed `Any` on purpose (`Any` is not coerced, so `5`, `"5"` and
+  `true` stay distinct comparisons), and the per-operator value rules live in the **validator**, not
+  in the schema, because only the validator can answer with a structured `{"status": "error"}`.
+  A filter is AND-combined: `filters` is a flat list, and an empty list means every row matches.
 - **Return annotations matter:** `-> dict` yields unstructured output (a JSON text block);
   `-> dict[str, Any]` yields structured output.
 - **Domain value objects are not JSON-serializable** (frozen dataclasses holding `Mapping` and
@@ -92,6 +102,13 @@ reaches persistence, so the domain layer holds only pure domain types.
   rows, no database). The SQL adapter belongs beside it in `infrastructure/persistence`; it is
   wired in exactly one place, `MCPServerWrapper._register_tools`, because `QueryTools` receives
   the port by constructor injection.
+- **The mock filters with SQL semantics — that behavior is the contract the SQL adapter must
+  match.** A comparison against a stored `NULL` excludes the row (three-valued logic) instead of
+  raising, which is why `ne` and `not_in` never match `NULL` rows even though Python's `!=` and
+  `not in` would. `like` is case-sensitive (Postgres-flavored): `%` is any run of characters, `_`
+  is exactly one character, everything else is literal. A comparison between incompatible types
+  (an integer column against `"x"`) is an anticipated caller mistake, so it is mapped to a
+  `ValidationError` rather than escaping as a `TypeError`.
 - Stale artifact: `src/__pycache__/mcp_server.cpython-314.pyc` is left over from the deleted
   `src/mcp_server.py`; ignore it.
 
@@ -129,6 +146,36 @@ reaches persistence, so the domain layer holds only pure domain types.
   asyncio.run(main())
   '@
   ```
+- Ad-hoc verification of the filter flow (same here-string rules apply):
+
+  ```powershell
+  .\.venv\Scripts\python.exe -B -c @'
+  import asyncio, sys
+  sys.path.insert(0, 'src')
+  from mcp.server.mcpserver.tools.base import Tool
+  from infrastructure.mcp_server.tools import QueryTools
+  from infrastructure.persistence.mock_repository import MockRepository
+
+  async def main():
+      tool = Tool.from_function(QueryTools(MockRepository()).get_list_records)
+      query = {'table': 'users', 'columns': ['id', 'name'],
+               'filters': [{'column': 'age', 'operator': 'gt', 'value': 40}]}
+      print(await tool.run({'query': query}, None))   # {'status': 'ok', 'records': [...]}
+
+      missing = dict(query, filters=[{'column': 'age', 'operator': 'gt'}])
+      print(await tool.run({'query': missing}, None)) # {'status': 'error', ...} -> validator
+
+      try:
+          await tool.run({'query': dict(query, limit=5)}, None)
+      except Exception as error:
+          print(type(error).__name__, 'limit is gone; use page_size')  # ToolError -> schema
+
+  asyncio.run(main())
+  '@
+  ```
+
+  That snippet shows the three channels in one place: a successful page, a business rejection
+  rendered as `{"status": "error"}`, and a shape error raised by the SDK as `ToolError`.
 
 ## Testing the MCP server
 
