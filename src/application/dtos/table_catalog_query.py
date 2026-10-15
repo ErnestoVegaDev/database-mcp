@@ -1,12 +1,16 @@
 """Input DTO for the get_table_catalog tool: filtered, paginated catalog query."""
 
-from dataclasses import dataclass
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 # src/ is on sys.path, so the domain package is imported as "domain".
 from domain.value_objects.pagination import DEFAULT_PAGE_SIZE
 
 
-@dataclass(frozen=True, slots=True)
+# Both boundary dtos share one convention: strict pydantic dataclasses. The
+# extra="forbid" config is what makes an unexpected key a loud schema error
+# instead of a value pydantic would silently drop.
+@pydantic_dataclass(frozen=True, slots=True, config=ConfigDict(extra="forbid"))
 class TableCatalogQuery:
     """Input data carrier for a filtered, paginated table catalog query.
 
