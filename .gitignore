@@ -36,3 +36,8 @@ dist/
 
 # Notebooks
 .ipynb_checkpoints
+
+#doc
+.odd/
+.odd
+/odd
