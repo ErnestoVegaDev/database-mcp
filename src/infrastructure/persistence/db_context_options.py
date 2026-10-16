@@ -149,6 +149,26 @@ class DbContextOptions:
             .build()
         )
 
+    @classmethod
+    def from_env_or_none(cls) -> "DbContextOptions | None":
+        """Build options from the environment, or ``None`` when no DB is configured.
+
+        This is the "is a database configured?" seam: the knowledge of WHICH
+        variable decides that lives here with the rest of the environment rules,
+        not as a raw ``os.environ`` read in the composition root. A caller that
+        must choose between a real adapter and a stand-in asks this method and
+        branches on ``None``.
+
+        Unlike :meth:`from_env`, an absent connection string is not an error
+        here; it means "not configured". A present-but-malformed value still
+        raises, because that is a misconfiguration worth surfacing loudly.
+        """
+        # A blank or whitespace-only value counts as unset, matching the
+        # builder's own strip() so "MCP_DB_CONNECTION_STRING=" behaves like unset.
+        if not os.environ.get(ENV_CONNECTION_STRING, "").strip():
+            return None
+        return cls.from_env()
+
 
 @dataclass(frozen=True, slots=True)
 class DbContextOptionsBuilder:

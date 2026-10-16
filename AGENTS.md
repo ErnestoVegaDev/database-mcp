@@ -2,10 +2,11 @@
 
 ## What this is
 
-Early-stage Python **MCP server** built on the official MCP Python SDK v2.3.0. Despite the
-repository name, there is **no database integration yet**: the persistence layer is a session
-factory plus an in-memory `MockRepository` stand-in, and the registered tools serve data through
-application use cases instead of a SQL adapter.
+Early-stage Python **MCP server** built on the official MCP Python SDK v2.3.0. The persistence
+layer is a SQLAlchemy `DbContext` plus a read-only SQL adapter (`SqlAlchemyRepository`); when no
+database is configured the composition root falls back to the in-memory `MockRepository` stand-in.
+The registered tools serve data through application use cases, so neither implementation is known
+above the `Repository` port.
 
 The code follows a layered `src/` layout (`domain` / `application` / `infrastructure`) with
 the MCP edge in `src/infrastructure/mcp_server/`. The entry point is `__main__.py`.
@@ -34,9 +35,11 @@ src/application/
   use_cases/get_list_records.py      GetListRecords — validate, translate filters, ask the port for a page
   validators/                        TableCatalogQueryValidator, ListRecordsQueryValidator — input rules checked before the domain
 src/infrastructure/
-  persistence/db_context.py          DbContext — async SQLAlchemy engine + async_sessionmaker
-  persistence/db_context_options.py  DbContextOptions + fluent builder (MCP_DB_* env vars)
-  persistence/mock_repository.py     MockRepository — in-memory stand-in that implements the port and the filter operators
+  persistence/db_context.py             DbContext — async SQLAlchemy engine + async_sessionmaker
+  persistence/db_context_options.py     DbContextOptions + fluent builder (MCP_DB_* env vars, from_env_or_none seam)
+  persistence/mock_repository.py        MockRepository — in-memory stand-in that implements the port and the filter operators
+  persistence/column_type_mapping.py    SQLAlchemy type -> ColumnType (ordered isinstance probes)
+  persistence/sqlalchemy_repository.py  SqlAlchemyRepository — read-only Core adapter behind the port
   mcp_server/tools/query_tools.py    QueryTools — MCP tool group (get_table_catalog, get_list_records)
   mcp_server/middlewares/            empty
 ```
@@ -98,10 +101,11 @@ reaches persistence, so the domain layer holds only pure domain types.
 - **No dependency manifest exists** — no `pyproject.toml`, no `requirements*.txt`, no
   `setup.py`. Dependencies live only in `.venv`. If you introduce a manifest, keep it
   authoritative.
-- **`Repository` is an ABC port with one implementation: `MockRepository`** (in-memory, canned
-  rows, no database). The SQL adapter belongs beside it in `infrastructure/persistence`; it is
-  wired in exactly one place, `MCPServerWrapper._register_tools`, because `QueryTools` receives
-  the port by constructor injection.
+- **`Repository` is an ABC port with two implementations: `MockRepository`** (in-memory, canned
+  rows, no database) **and `SqlAlchemyRepository`** (read-only, real database, built on SQLAlchemy
+  Core + reflection). Both sit in `infrastructure/persistence`; the port is chosen in exactly one
+  place, `MCPServerWrapper._build_repository`, because `QueryTools` receives the port by constructor
+  injection.
 - **The mock filters with SQL semantics — that behavior is the contract the SQL adapter must
   match.** A comparison against a stored `NULL` excludes the row (three-valued logic) instead of
   raising, which is why `ne` and `not_in` never match `NULL` rows even though Python's `!=` and
@@ -109,6 +113,45 @@ reaches persistence, so the domain layer holds only pure domain types.
   is exactly one character, everything else is literal. A comparison between incompatible types
   (an integer column against `"x"`) is an anticipated caller mistake, so it is mapped to a
   `ValidationError` rather than escaping as a `TypeError`.
+- **Persistence is selectable — `SqlAlchemyRepository` or `MockRepository`.** The composition root
+  (`MCPServerWrapper._build_repository`) asks `DbContextOptions.from_env_or_none()`: a non-blank
+  `MCP_DB_CONNECTION_STRING` selects the SQL adapter, otherwise it logs a **warning on stderr**
+  through `logging.getLogger(__name__)` and serves the in-memory stand-in. The env knowledge lives
+  in the options class, not in the wrapper, and the warning is never a `print`: on the stdio
+  transport stdout carries the JSON-RPC stream, so a `print` there corrupts the protocol.
+- **The adapter keeps every DB call inside `session.run_sync`.** `AsyncSession.run_sync` hands the
+  callback the SYNC `Session` (not a `Connection`), so `sqlalchemy_repository` borrows the
+  connection with `sync_session.connection()` and drives `sqlalchemy.inspect`, reflection
+  (`Table(name, MetaData(), schema=..., autoload_with=conn)`) and Core `select(...)` through it.
+  Never touch the async connection outside `run_sync`. Reflection quotes identifiers and parameter
+  binding carries values, so no identifier or value is ever interpolated into a SQL string.
+- **Adapter error mapping: expected failures are values, driver failures are sanitized.** For
+  **expected** cases return `Failure(NotFoundError(...))`: missing table (`entity="table"`),
+  missing schema (`entity="schema"`), missing column (`entity="column"`), missing row
+  (`entity="row"`). Catch only SQLAlchemy's hierarchy — `NoSuchTableError` subclasses
+  `InvalidRequestError` → `SQLAlchemyError`, so its handler must come **first** when both are
+  caught. Any other `SQLAlchemyError` becomes `Failure(DomainError)` with a **sanitized** message:
+  only the exception CLASS name, never the connection string, URL, credentials or raw driver text,
+  because the MCP edge renders it to the caller. The full exception is logged at error level to
+  `logging.getLogger(__name__)` (stderr) so operators keep the detail. A bare `except` is banned:
+  it would reclassify a bug as a normal result.
+- **`ORDER BY`, or pagination lies.** `LIMIT`/`OFFSET` without a stable order can return the same
+  row on two pages. `get_table_catalog` orders by `(table_schema, table_name)`; `get_result_set`
+  orders by the reflected primary key, and when the table has **none** it imposes no order, so page
+  stability is then the caller's risk (a keyless table has no stable identity). The mock preserves
+  insertion order instead — the same while rows are stable, but never a promise.
+- **Schema resolution (D3).** `schema=None` means "no schema filter" and resolves to
+  `Inspector.default_schema_name` (`public` / `dbo`); the catalog reports it as `table_schema`. On
+  **SQLite** (no schemas) an explicit schema is **ignored** and the catalog reports the namespace
+  label `"main"`. On a dialect that has schemas, an explicit value absent from
+  `Inspector.get_schema_names()` is `Failure(NotFoundError(entity="schema"))`.
+- **`Decimal` is widened to `float` at the adapter boundary.** A numeric column is declared
+  `ColumnType.FLOAT` (the domain enum has no decimal member), so the declared type must be true of
+  the delivered value; `_normalize_value` converts `Decimal`→`float` and nothing else. The
+  precision tradeoff is real and documented in the helper, not hidden.
+- **`LIKE` case sensitivity belongs to the dialect, not the mock.** The mock is Postgres-flavored
+  (case-sensitive on ASCII); SQLite's `LIKE` is case-insensitive, so the same pattern can match
+  more rows there. The adapter does exactly what `.like(pattern)` does on the configured dialect.
 - Stale artifact: `src/__pycache__/mcp_server.cpython-314.pyc` is left over from the deleted
   `src/mcp_server.py`; ignore it.
 
@@ -121,6 +164,11 @@ reaches persistence, so the domain layer holds only pure domain types.
   `anyio` 4.15.1, `returns` 0.29.0.
 - SQL Server connectivity depends on the OS-level ODBC Driver 17/18 (already installed);
   SQLite async needs `aiosqlite` (present).
+- **Configure the database with `MCP_DB_CONNECTION_STRING`** (an async SQLAlchemy URL:
+  `sqlite+aiosqlite:///...`, `postgresql+asyncpg://...`, `mssql+aioodbc://...`). Set it to select
+  `SqlAlchemyRepository`; leave it unset and the server serves `MockRepository` with a stderr
+  warning. `MCP_DB_POOL_TIMEOUT_SECONDS`, `MCP_DB_CONNECT_TIMEOUT_SECONDS` and `MCP_DB_ECHO` tune
+  the pool. The "is a database configured?" decision is `DbContextOptions.from_env_or_none()`.
 
 ## Commands
 
@@ -176,6 +224,43 @@ reaches persistence, so the domain layer holds only pure domain types.
 
   That snippet shows the three channels in one place: a successful page, a business rejection
   rendered as `{"status": "error"}`, and a shape error raised by the SDK as `ToolError`.
+- Ad-hoc verification against the SQL adapter. This builds the context directly
+  (`DbContextOptions(connection_string=...)`); in the running server the same switch is driven by
+  `MCP_DB_CONNECTION_STRING`. **Executed**, with the observed output below the snippet:
+
+  ```powershell
+  .\.venv\Scripts\python.exe -B -c @'
+  import asyncio, sys
+  sys.path.insert(0, 'src')
+  from sqlalchemy import MetaData, Table, Column, Integer, String
+  from mcp.server.mcpserver.tools.base import Tool
+  from infrastructure.persistence.db_context import DbContext
+  from infrastructure.persistence.db_context_options import DbContextOptions
+  from infrastructure.persistence.sqlalchemy_repository import SqlAlchemyRepository
+  from infrastructure.mcp_server.tools import QueryTools
+
+  async def main():
+      context = DbContext(DbContextOptions(connection_string='sqlite+aiosqlite:///:memory:'))
+      meta = MetaData()
+      users = Table('users', meta, Column('id', Integer, primary_key=True), Column('name', String))
+      def seed(conn):
+          meta.create_all(conn)
+          conn.execute(users.insert(), [{'id': 1, 'name': 'Ada'}])
+      async with context.engine.begin() as conn:
+          await conn.run_sync(seed)
+      tool = Tool.from_function(QueryTools(SqlAlchemyRepository(context)).get_list_records)
+      print(await tool.run({'query': {'table': 'users', 'columns': ['id', 'name']}}, None))
+      await context.dispose()
+
+  asyncio.run(main())
+  '@
+  ```
+
+  Observed (the adapter path end to end, with no file written to disk):
+
+  ```text
+  {'status': 'ok', 'columns': {'id': 'integer', 'name': 'text'}, 'records': [{'id': 1, 'name': 'Ada'}]}
+  ```
 
 ## Testing the MCP server
 
