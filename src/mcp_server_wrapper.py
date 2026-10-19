@@ -2,15 +2,8 @@ import logging
 
 from mcp.server import MCPServer as SDKMCPServer
 
-from application.interfaces import Repository
-from infrastructure.mcp_server.tools import QueryTools
-from infrastructure.persistence.db_context import DbContext
-from infrastructure.persistence.db_context_options import (
-    ENV_CONNECTION_STRING,
-    DbContextOptions,
-)
-from infrastructure.persistence.mock_repository import MockRepository
-from infrastructure.persistence.sqlalchemy_repository import SqlAlchemyRepository
+from features.connections import ConnectionsTools
+from shared.persistence import ConnectionRegistry, DbContextFactory
 
 # Diagnostics go to logging (stderr), never to print(). On the stdio transport
 # stdout carries the JSON-RPC stream, so a stray print() corrupts the protocol
@@ -22,63 +15,64 @@ class MCPServerWrapper:
     """Wrapper class for the Database MCP server.
 
     Provides a clean, application-specific abstraction around the MCP Python SDK's
-    MCPServer. It encapsulates initialization, component registration (tools,
-    resources, and prompts), and both synchronous and asynchronous startup logic.
+    MCPServer. It encapsulates initialization, component registration (tools),
+    and both synchronous and asynchronous startup logic.
     """
 
     def __init__(self, name: str = "database-mcp") -> None:
         # Create the base MCP server instance (MCP Python SDK v2.3.0)
         self.mcp = SDKMCPServer(name)
 
-        # Register server components
+        # Register server components. The composition root builds the
+        # persistence pipeline here and hands each slice what it needs.
         self._register_tools()
-        self._register_resources()
         # self._register_prompts()  # Uncomment when prompts are added
 
     def _register_tools(self) -> None:
-        """Register MCP tools against the repository the configuration selects."""
-        # Query tools are a separate group; register them on the same server.
-        # The composition root is the ONLY place that chooses a concrete
-        # adapter: QueryTools receives the port, so swapping the implementation
-        # here changes nothing in the use cases or the MCP edge.
-        self._repository = self._build_repository()
-        QueryTools(self._repository).register(self.mcp)
+        """Register the MCP tool groups against the shared persistence factory.
 
-    def _build_repository(self) -> Repository:
-        """Select the SQL adapter when a database is configured, else the stand-in.
-
-        The "is a database configured?" question is answered by the options
-        class, not by reading the environment here, so the env-var contract
-        stays in one module (D8).
+        Every slice receives the same ``DbContextFactory`` and registers its
+        tools on the one server. A slice that is never registered here simply
+        does not exist for the client, so this method is the single place that
+        decides which tools the server exposes.
         """
-        options = DbContextOptions.from_env_or_none()
-        if options is None:
-            # No database configured: keep the server runnable by serving the
-            # in-memory fixture, but make the fallback visible instead of
-            # silently pretending the fixture is real data.
-            logger.warning(
-                "No database configured (%s is unset); serving fixture data "
-                "from MockRepository. Set %s to use a real database.",
-                ENV_CONNECTION_STRING,
-                ENV_CONNECTION_STRING,
+        factory = self._build_factory()
+        ConnectionsTools(factory).register(self.mcp)
+
+        # T6-T9 register the remaining groups the exact same way: import the
+        # slice and call ``<Group>(factory).register(self.mcp)`` here. Adding a
+        # tool is a one-line change in this method, never a new composition root.
+
+    def _build_factory(self) -> DbContextFactory:
+        """Build the persistence pipeline from the environment.
+
+        An empty environment is a valid state: with no engine configured the
+        factory still answers every call, returning "not configured" for the
+        tools that need a specific engine. That is why there is no stand-in
+        repository any more — "no database" is a first-class answer, not a
+        reason to refuse to boot.
+
+        Returns:
+            The factory that dispatches engines to their cached contexts. It is
+            also stored on ``self`` because the shutdown path disposes it.
+        """
+        registry = ConnectionRegistry.from_env()
+        factory = DbContextFactory(registry)
+        self._factory = factory
+
+        engines = factory.configured_engines
+        if engines:
+            # Names only: a label can never be, or contain, a DSN.
+            logger.info(
+                "Configured engines: %s.",
+                ", ".join(engine.label for engine in engines),
             )
-            return MockRepository()
-
-        # A configured database selects the real adapter. Building the
-        # DbContext is lazy: it creates the engine/pool but does not connect
-        # until the first query, so an unreachable database surfaces per request
-        # as a sanitized failure rather than at startup.
-        self._db_context = DbContext(options)
-        logger.info("Database configured; using SqlAlchemyRepository.")
-        return SqlAlchemyRepository(self._db_context)
-
-    def _register_resources(self) -> None:
-        """Register MCP resources."""
-
-        @self.mcp.resource("greeting://{name}")
-        def greeting(name: str) -> str:
-            """Greet someone by name."""
-            return f"Hello, {name}!"
+        else:
+            logger.info(
+                "No database engine configured; discovery tools will report "
+                "an empty connection list."
+            )
+        return factory
 
     # def _register_prompts(self) -> None:
     #     """Register MCP prompts."""
@@ -86,6 +80,10 @@ class MCPServerWrapper:
 
     def run(self, transport: str = "stdio") -> None:
         """Start the MCP server using a synchronous transport.
+
+        This path cannot await the asynchronous pool shutdown, so cached
+        database contexts are not disposed here. Use :meth:`run_async` (the
+        application entry point) when closing pooled connections matters.
 
         Args:
             transport: Transport to use ('stdio', 'sse', 'streamable-http').
@@ -111,24 +109,33 @@ class MCPServerWrapper:
 
         Preferred for I/O-bound workloads (e.g., database access, network calls).
 
+        Whatever the outcome of the transport — a clean return, an unsupported
+        name, or a mid-serve exception — the cached database pools are disposed
+        exactly once on the way out. A ``finally`` around the whole dispatch
+        guarantees the cleanup runs even when the transport raises, and the
+        original exception still propagates.
+
         Args:
             transport: Transport to use ('stdio', 'sse', 'streamable-http').
         """
         transport = transport.lower().strip()
 
-        if transport == "stdio":
-            await self.mcp.run_stdio_async()
-            return
+        try:
+            if transport == "stdio":
+                await self.mcp.run_stdio_async()
+                return
 
-        if transport == "sse":
-            await self.mcp.run_sse_async()
-            return
+            if transport == "sse":
+                await self.mcp.run_sse_async()
+                return
 
-        if transport == "streamable-http":
-            await self.mcp.run_streamable_http_async()
-            return
+            if transport == "streamable-http":
+                await self.mcp.run_streamable_http_async()
+                return
 
-        raise ValueError(f"Unsupported transport: {transport}")
+            raise ValueError(f"Unsupported transport: {transport}")
+        finally:
+            await self._factory.dispose_all()
 
 
 # Alias to maintain the requested naming convention
