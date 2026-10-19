@@ -1,0 +1,180 @@
+"""Configuration for a single database connection.
+
+This module owns the *how* of one connection: the connection string and the
+timeout/pooling knobs. It deliberately imports no SQLAlchemy — it is a plain
+configuration carrier, so it can be validated without a database and without an
+event loop.
+
+Reading the environment is **not** done here. One variable per engine, scheme
+validation, and the configured/not-configured decision all live in
+:class:`~shared.persistence.connection_registry.ConnectionRegistry`; this module
+only carries the values the registry hands it.
+
+The object is assembled with a small fluent builder. Every ``with_*`` method
+returns a NEW builder instead of mutating the current one, so the whole thing
+stays immutable and safe to share. ``build()`` is the only place that validates.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field, replace
+
+# Environment variable names for the shared knobs. The unit is part of the name
+# on purpose: a timeout called just "TIMEOUT" is a bug waiting for its turn. The
+# MCP_DB_ prefix namespaces them so they cannot collide with unrelated variables.
+ENV_POOL_TIMEOUT_SECONDS = "MCP_DB_POOL_TIMEOUT_SECONDS"
+ENV_CONNECT_TIMEOUT_SECONDS = "MCP_DB_CONNECT_TIMEOUT_SECONDS"
+ENV_ECHO = "MCP_DB_ECHO"
+
+# SQLAlchemy's own default for pool_timeout, restated so the builder and the
+# engine agree on a single number.
+DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
+
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
+
+
+def env_float(name: str, default: float) -> float:
+    """Read an optional float env var, falling back to ``default`` when unset."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def env_optional_float(name: str) -> float | None:
+    """Read an optional float env var; ``None`` when unset or blank."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def env_bool(name: str, default: bool) -> bool:
+    """Read a boolean env var from the usual truthy/falsy spellings."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in _TRUTHY:
+        return True
+    if normalized in _FALSY:
+        return False
+    raise ValueError(f"{name} must be one of {sorted(_TRUTHY | _FALSY)}, got {raw!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionOptions:
+    """Validated, immutable configuration for one connection.
+
+    Build it directly for tests::
+
+        ConnectionOptions(connection_string="sqlite+aiosqlite:///:memory:")
+
+    or through the fluent builder when you have several options::
+
+        (ConnectionOptions.builder()
+            .with_connection_string(dsn)
+            .with_pool_timeout_seconds(10)
+            .build())
+
+    The values an MCP client declares in its server ``env`` block are read by
+    :class:`~shared.persistence.connection_registry.ConnectionRegistry`, which
+    builds one of these per configured engine.
+    """
+
+    # repr=False keeps the connection string (and its password) out of logs,
+    # tracebacks and error messages. Everything else is safe to print.
+    connection_string: str = field(repr=False)
+
+    # How long a caller waits for a free connection from the pool before
+    # SQLAlchemy raises. Driver-agnostic: SQLAlchemy itself enforces it.
+    pool_timeout_seconds: float = DEFAULT_POOL_TIMEOUT_SECONDS
+
+    # How long the driver waits to OPEN a new connection. Optional, because it
+    # is driver-specific: asyncpg and pyodbc both accept ``timeout``, aiosqlite
+    # ignores it. None means "leave the driver default alone".
+    connect_timeout_seconds: float | None = None
+
+    # Log every SQL statement. Debugging aid; noisy in production.
+    echo: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject invalid options at construction time (fail fast)."""
+        if not self.connection_string.strip():
+            raise ValueError(
+                "connection_string is required and must be non-empty. Pass it "
+                "to the builder, or set the connection variable for that engine."
+            )
+        if self.pool_timeout_seconds <= 0:
+            raise ValueError(
+                f"pool_timeout_seconds must be > 0, got {self.pool_timeout_seconds!r}. "
+                f"Check {ENV_POOL_TIMEOUT_SECONDS}."
+            )
+        if self.connect_timeout_seconds is not None and self.connect_timeout_seconds <= 0:
+            raise ValueError(
+                "connect_timeout_seconds must be > 0 when set, got "
+                f"{self.connect_timeout_seconds!r}. Check {ENV_CONNECT_TIMEOUT_SECONDS}."
+            )
+
+    @staticmethod
+    def builder() -> "ConnectionOptionsBuilder":
+        """Start a fluent, immutable builder."""
+        return ConnectionOptionsBuilder()
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionOptionsBuilder:
+    """Fluent, immutable builder for :class:`ConnectionOptions`.
+
+    Each ``with_*`` returns a new builder, so a half-configured builder can be
+    shared and branched without aliasing surprises::
+
+        base = ConnectionOptions.builder().with_connection_string(dsn)
+        fast = base.with_pool_timeout_seconds(5).build()
+        slow = base.with_pool_timeout_seconds(60).build()
+    """
+
+    # Private, all-optional staging fields. They only become a validated
+    # ConnectionOptions in build(); a partial state never raises on its own.
+    _connection_string: str = field(default="", repr=False)
+    _pool_timeout_seconds: float = DEFAULT_POOL_TIMEOUT_SECONDS
+    _connect_timeout_seconds: float | None = None
+    _echo: bool = False
+
+    def with_connection_string(self, connection_string: str) -> "ConnectionOptionsBuilder":
+        """Set the SQLAlchemy connection URL (the async driver is in the scheme)."""
+        return replace(self, _connection_string=connection_string)
+
+    def with_pool_timeout_seconds(self, seconds: float) -> "ConnectionOptionsBuilder":
+        """Set how long to wait for a free pooled connection."""
+        return replace(self, _pool_timeout_seconds=seconds)
+
+    def with_connect_timeout_seconds(self, seconds: float | None) -> "ConnectionOptionsBuilder":
+        """Set the driver-level connect timeout (None leaves the driver default)."""
+        return replace(self, _connect_timeout_seconds=seconds)
+
+    def with_echo(self, echo: bool = True) -> "ConnectionOptionsBuilder":
+        """Turn SQL statement logging on (default) or off."""
+        return replace(self, _echo=echo)
+
+    def build(self) -> ConnectionOptions:
+        """Validate the staged values and produce the immutable options.
+
+        Raises:
+            ValueError: if any staged value is invalid (see
+                :meth:`ConnectionOptions.__post_init__`).
+        """
+        return ConnectionOptions(
+            connection_string=self._connection_string.strip(),
+            pool_timeout_seconds=self._pool_timeout_seconds,
+            connect_timeout_seconds=self._connect_timeout_seconds,
+            echo=self._echo,
+        )
