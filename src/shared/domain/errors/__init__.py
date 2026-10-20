@@ -2,6 +2,7 @@
 
 from .domain_error import DomainError
 from .not_found_error import NotFoundError
+from .render import error_payload
 from .validation_error import ValidationError, ValidationErrors
 
 __all__ = [
@@ -9,4 +10,5 @@ __all__ = [
     "NotFoundError",
     "ValidationError",
     "ValidationErrors",
+    "error_payload",
 ]

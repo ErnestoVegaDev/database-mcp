@@ -3,6 +3,7 @@ import logging
 from mcp.server import MCPServer as SDKMCPServer
 
 from features.connections import ConnectionsTools
+from features.database_objects import DatabaseObjectsTools
 from shared.persistence import ConnectionRegistry, DbContextFactory
 
 # Diagnostics go to logging (stderr), never to print(). On the stdio transport
@@ -38,6 +39,7 @@ class MCPServerWrapper:
         """
         factory = self._build_factory()
         ConnectionsTools(factory).register(self.mcp)
+        DatabaseObjectsTools(factory).register(self.mcp)
 
         # T6-T9 register the remaining groups the exact same way: import the
         # slice and call ``<Group>(factory).register(self.mcp)`` here. Adding a
