@@ -5,6 +5,8 @@ from mcp.server import MCPServer as SDKMCPServer
 from features.connections import ConnectionsTools
 from features.database_info import DatabaseInfoTools
 from features.database_objects import DatabaseObjectsTools
+from features.query import QueryTools
+from features.table_schema import TableSchemaTools
 from shared.persistence import ConnectionRegistry, DbContextFactory
 
 # Diagnostics go to logging (stderr), never to print(). On the stdio transport
@@ -42,8 +44,10 @@ class MCPServerWrapper:
         ConnectionsTools(factory).register(self.mcp)
         DatabaseInfoTools(factory).register(self.mcp)
         DatabaseObjectsTools(factory).register(self.mcp)
+        QueryTools(factory).register(self.mcp)
+        TableSchemaTools(factory).register(self.mcp)
 
-        # T6-T9 register the remaining groups the exact same way: import the
+        # T6-T8 register the remaining groups the exact same way: import the
         # slice and call ``<Group>(factory).register(self.mcp)`` here. Adding a
         # tool is a one-line change in this method, never a new composition root.
 
