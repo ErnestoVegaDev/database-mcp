@@ -3,6 +3,7 @@ import logging
 from mcp.server import MCPServer as SDKMCPServer
 
 from features.connections import ConnectionsTools
+from features.database_info import DatabaseInfoTools
 from features.database_objects import DatabaseObjectsTools
 from shared.persistence import ConnectionRegistry, DbContextFactory
 
@@ -39,6 +40,7 @@ class MCPServerWrapper:
         """
         factory = self._build_factory()
         ConnectionsTools(factory).register(self.mcp)
+        DatabaseInfoTools(factory).register(self.mcp)
         DatabaseObjectsTools(factory).register(self.mcp)
 
         # T6-T9 register the remaining groups the exact same way: import the
