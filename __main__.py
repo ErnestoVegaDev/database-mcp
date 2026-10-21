@@ -16,12 +16,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-#SQL crudo — el SQL lo escribe el modelo
-#Superficie tipada
-#list_connections - List all database connections
-#get_database_info - Get database details (type, version, features)
-#list_database_objects - List tables, views, procedures
-#describe_tables - Get table structures
-#execute_query - Execute read-only SQL (SELECT/SHOW)
-#execute_update - Execute write operations (requires confirmation)
