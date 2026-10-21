@@ -37,7 +37,8 @@ Hard rules — apply them on every task, no exceptions.
 ## Layout
 
 ```text
-__main__.py                          entry point: path bootstrap + run the wrapper (stdio)
+__main__.py                          entry point: path bootstrap (guarded) + run the wrapper (stdio)
+database-mcp.spec                    PyInstaller build definition for the standalone executable
 src/mcp_server_wrapper.py            MCPServerWrapper: SDK server + component registration + transports
 src/shared/                          cross-cutting code, no tool logic
   domain/errors/                     DomainError, NotFoundError, ValidationError(s) — expected failures
@@ -72,7 +73,10 @@ slices need the same code, that code belongs in `shared/`. `shared` never import
   `src/mcp_server_wrapper.py`) and no `MCPServerBase`. When you see `MCPServer` in code,
   it is the **SDK** type, not the wrapper.
 - **`__main__.py` imports `MCPServerWrapper` and hardcodes `run_async(transport="stdio")`.**
-  There is no CLI or environment switch for the transport yet.
+  There is no CLI or environment switch for the transport yet. Its `sys.path.insert` is guarded by
+  `if not getattr(sys, "frozen", False)`: frozen by PyInstaller, `--paths src` already put the
+  packages on `sys.path` at build time and `__file__` points into the extraction directory where
+  `src/` is not a real directory, so the insert would add a path that never existed.
 - **Slices register their tools through `mcp.add_tool(...)` inside a `register(mcp)`
   method**, and `MCPServerWrapper._register_tools` is the composition root that builds the
   factory and calls each slice's `register`. A tool group is unreachable unless the wrapper
@@ -165,6 +169,16 @@ slices need the same code, that code belongs in `shared/`. `shared` never import
   `pyodbc`, `aioodbc` or `aiosqlite` today; the extras exist so enabling an engine does
   not require rediscovering its driver set. Install one with
   `.\.venv\Scripts\python.exe -m pip install -e ".[mssql]"`.
+- **`database-mcp.spec` is the only supported build recipe — never the raw CLI flags.**
+  Three things force it, and none is visible to static analysis: `pathex=['src']` because
+  the slices import absolutely from the top of `src/`; SQLAlchemy resolves its dialect
+  modules from a URL string at runtime, so `postgresql.asyncpg` and `mysql.aiomysql` are
+  never imported in source and must be hidden imports; and `asyncpg`/`aiomysql` ship
+  compiled extensions that `collect_all` has to gather. Add an engine and the spec needs
+  the matching `collect_all` and dialect `--hidden-import`, or the frozen binary fails with
+  `No module named '<driver>'` only at query time, not at boot.
+- **`console=True` is mandatory in the spec.** stdout carries the JSON-RPC stream for the
+  stdio transport; a windowed build would break the protocol.
 - **`ORDER BY`, or pagination lies.** The server no longer paginates for the caller (raw
   SQL owns LIMIT/OFFSET), but when a slice pages internally it must impose a stable order
   or the same row can appear on two pages.
@@ -198,6 +212,16 @@ slices need the same code, that code belongs in `shared/`. `shared` never import
 
 - Run the server: `.\.venv\Scripts\python.exe __main__.py` (stdio transport). The wrapper
   boots and registers the five tools listed above.
+- Build the standalone executable:
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m pip install pyinstaller
+  .\.venv\Scripts\pyinstaller.exe database-mcp.spec
+  ```
+
+  Produces `dist\database-mcp.exe` (~28 MB). `build/` and `dist/` are git-ignored, so the
+  binary is an artifact and never a committed file. Verify it by speaking JSON-RPC to it —
+  a clean exit proves nothing, because a stdio server exiting immediately is also clean.
 - **No test, lint, format, or typecheck tooling is configured.** Do not assume a runner
   exists; if you add one, document the exact command here.
 - Ad-hoc verification (use `-B` so no `__pycache__` is written):
@@ -258,7 +282,7 @@ matching one before starting the related task.
 - Default branch `main`; remote `origin` → `ErnestoVegaDev/database-mcp`.
 - Commit style follows Conventional Commits (e.g. `chore(gitignore): ...`).
 - Tracked: all of `src/`, plus `.gitignore`, `AGENTS.md`, `README.md`, `__main__.py`,
-  `pyproject.toml`, `requirements.lock`, and `.opencode/skills/**`.
+  `pyproject.toml`, `requirements.lock`, `database-mcp.spec`, and `.opencode/skills/**`.
 - `.gitignore` ignores `opencode.json`, `.atl`, `.venv/`, `.venv-*/`, `.idea`, `__pycache__/`,
   and `*.py[cod]`. Note that `.opencode/` is **not** ignored — the skills are versioned on
   purpose. The `.venv-*/` pattern exists because a throwaway `.venv-test` is how you verify

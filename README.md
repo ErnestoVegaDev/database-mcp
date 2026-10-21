@@ -191,13 +191,39 @@ exists; if you add one, document the exact command here. For an ad-hoc import ch
 `__pycache__`):
 
 ```powershell
-.\.venv\Scripts\python.exe -B -c @'
-import sys
-sys.path.insert(0, 'src')
-import mcp_server_wrapper
-print('import ok')
-'@
+.\.venv\Scripts\python.exe -B -c "import sys; sys.path.insert(0, 'src'); import mcp_server_wrapper; print('import ok')"
 ```
+
+### Building a standalone executable
+
+For running the server on a machine without Python, the repo ships a PyInstaller definition:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pyinstaller
+.\.venv\Scripts\pyinstaller.exe database-mcp.spec
+```
+
+The result is `dist\database-mcp.exe` (~28 MB, self-contained). Use the `.spec` instead of raw command-line flags:
+it is the versioned record of the three things this project needs (the `src` package root, the runtime-resolved
+SQLAlchemy dialects, and the compiled `asyncpg`/`aiomysql` extensions).
+
+`build/` and `dist/` are git-ignored, so the binary is a build artifact, never a committed file.
+
+Verify the binary by speaking JSON-RPC to it rather than trusting that it exits cleanly:
+
+```powershell
+$env:POSTGRES_CONNECTION_STRING = "postgresql://user:pass@localhost:5432/mydb"
+.\dist\database-mcp.exe
+```
+
+It should print `Configured engines: PostgreSQL.` on stderr and then wait on stdin. To drive it interactively:
+
+```powershell
+npx @modelcontextprotocol/inspector .\dist\database-mcp.exe
+```
+
+The Inspector has no UI for per-session environment variables — it inherits the shell's environment, so export the
+`*_CONNECTION_STRING` variables before launching it.
 
 ### HTTP transports
 
