@@ -17,6 +17,15 @@ therefore accepts those plain schemes as aliases and rewrites them to the single
 canonical scheme before the URL reaches SQLAlchemy. An alias is *not* a driver
 choice — there is only one driver to choose.
 
+One engine can cover more than one vendor. MySQL and MariaDB share the driver,
+the dialect, ``information_schema``, and the read-only transaction, so they are a
+single member (``MARIA``) reached through two aliases, and the label names both.
+That is not a merge of convenience: adding a second member for MySQL would make
+``mysql://`` ambiguous between two engines and would report one database as two
+different connections. A vendor that diverges in a way a slice can observe — a
+different driver, dialect, catalog, or capability floor — is what earns its own
+member.
+
 The catalog uses ``StrEnum`` so a member compares and serializes as its plain
 string value (``SupportedEngine.POSTGRES == "postgres"``). That makes it safe
 to hand straight to JSON without a mapping table.
@@ -44,7 +53,10 @@ class _EngineSpec:
             DSN doc, e.g. ``postgresql``. Each is accepted and rewritten to the
             engine's single canonical scheme; an alias never selects a driver,
             because the engine has exactly one.
-        label: Human-readable name for tool output and log messages.
+        label: Human-readable name for tool output and log messages. It names
+            every server this engine reaches, not one vendor: the ``mysql``
+            driver and dialect serve MySQL and MariaDB alike, so the label
+            says both.
     """
 
     env_var: str
@@ -130,6 +142,6 @@ _ENGINE_SPECS: dict[SupportedEngine, _EngineSpec] = {
         env_var="MARIA_CONNECTION_STRING",
         url_schemes=("mysql+aiomysql",),
         alias_schemes=("mysql", "mariadb"),
-        label="MariaDB",
+        label="MySQL/MariaDB",
     ),
 }
