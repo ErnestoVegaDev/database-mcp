@@ -66,11 +66,24 @@ to the MCP boundary and never leak credentials.
 git clone https://github.com/ErnestoVegaDev/database-mcp.git
 cd database-mcp
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install "mcp==2.3.0" "mcp-types==2.3.0" pydantic SQLAlchemy asyncpg aiomysql greenlet returns
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock
 ```
 
-> There is no `pyproject.toml` or `requirements.txt` in this repo yet — dependencies live in `.venv`. The command
-> above installs the direct dependencies; if you add a manifest, keep it authoritative and update this section.
+`requirements.lock` pins the full dependency set (direct and transitive), so this rebuilds the same environment the
+project was verified against. If you prefer the declared view instead of the frozen one, `pyproject.toml` lists the
+eight direct dependencies with exact versions.
+
+Optional stacks are declared as extras and are not needed for PostgreSQL or MariaDB:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[mssql]"    # pyodbc + aioodbc, for a future SQL Server engine
+```
+
+### Verify the environment
+
+```powershell
+.\.venv\Scripts\python.exe -c "import mcp, sqlalchemy, asyncpg, aiomysql; print('ok')"
+```
 
 ### Configure
 

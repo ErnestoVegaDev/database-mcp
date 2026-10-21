@@ -1,0 +1,29 @@
+[project]
+name = "database-mcp"
+version = "0.1.0"
+description = "MCP server that exposes database discovery tools and one read-only SQL executor, so the model writes the SQL."
+requires-python = ">=3.14"
+dependencies = [
+    # MCP protocol surface: the SDK server and the tool type wrappers.
+    "mcp==2.3.0",
+    "mcp-types==2.3.0",
+    # Required transitively by the SDK for tool schemas; the server does not
+    # import pydantic directly, but tool registration does.
+    "pydantic==2.14.0",
+    # Async engines, sessions and text() statement execution.
+    "SQLAlchemy==2.1.4",
+    # SQLAlchemy's async bridge; the async engines do not run without it.
+    "greenlet==3.5.6",
+    # Result monad behind the Success/Failure returns of the factory.
+    "returns==0.29.0",
+    # One driver per engine. Exactly one is needed to reach each server.
+    "asyncpg==0.32.0",
+    "aiomysql==0.3.2",
+]
+
+# Optional stacks. Nothing here is imported by the code today: these are the
+# dependencies an unwired engine would need, listed so enabling one does not
+# require rediscovering them. Install with: pip install -e ".[mssql]"
+[project.optional-dependencies]
+mssql = ["pyodbc==5.3.0", "aioodbc==0.5.0"]
+sqlite = ["aiosqlite==0.22.1"]

@@ -4,6 +4,7 @@ opencode.json
 
 # Venv
 .venv/
+.venv-*/
 venv/
 env/
 ENV/

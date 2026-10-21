@@ -153,9 +153,18 @@ slices need the same code, that code belongs in `shared/`. `shared` never import
   `5.5.5-` prefix is stripped **for parsing only** while the payload echoes the server
   string verbatim; `returning` is always `false` on MariaDB and `extensions` is always `[]`
   there by contract. An unparsable version yields all seven feature keys as `null`.
-- **No dependency manifest exists** — no `pyproject.toml`, no `requirements*.txt`, no
-  `setup.py`. Dependencies live only in `.venv`. If you introduce a manifest, keep it
-  authoritative.
+- **A dependency manifest exists now** — `pyproject.toml` declares the project and its
+  8 direct dependencies with exact pins; `requirements.lock` freezes the full transitive
+  set (42 packages) for a byte-identical rebuild. Keep both authoritative: adding a
+  dependency means editing `pyproject.toml`, then regenerating the lock with
+  `.\.venv\Scripts\python.exe -m pip freeze > requirements.lock`.
+- **`requires-python = ">=3.14"`** matches the verified interpreter (3.14.5). Lowering
+  that floor is a tested decision, not an edit: several pinned dependencies would need
+  wheels confirmed for the older version first.
+- **The `mssql` and `sqlite` extras are declarations, not wiring.** No module imports
+  `pyodbc`, `aioodbc` or `aiosqlite` today; the extras exist so enabling an engine does
+  not require rediscovering its driver set. Install one with
+  `.\.venv\Scripts\python.exe -m pip install -e ".[mssql]"`.
 - **`ORDER BY`, or pagination lies.** The server no longer paginates for the caller (raw
   SQL owns LIMIT/OFFSET), but when a slice pages internally it must impose a stable order
   or the same row can appear on two pages.
@@ -248,9 +257,11 @@ matching one before starting the related task.
 
 - Default branch `main`; remote `origin` → `ErnestoVegaDev/database-mcp`.
 - Commit style follows Conventional Commits (e.g. `chore(gitignore): ...`).
-- Tracked: all of `src/`, plus `.gitignore`, `AGENTS.md`, `README.md`, `__main__.py`, and
-  `.opencode/skills/**`.
-- `.gitignore` ignores `opencode.json`, `.atl`, `.venv/`, `.idea`, `__pycache__/`, and
-  `*.py[cod]`. Note that `.opencode/` is **not** ignored — the skills are versioned on purpose.
+- Tracked: all of `src/`, plus `.gitignore`, `AGENTS.md`, `README.md`, `__main__.py`,
+  `pyproject.toml`, `requirements.lock`, and `.opencode/skills/**`.
+- `.gitignore` ignores `opencode.json`, `.atl`, `.venv/`, `.venv-*/`, `.idea`, `__pycache__/`,
+  and `*.py[cod]`. Note that `.opencode/` is **not** ignored — the skills are versioned on
+  purpose. The `.venv-*/` pattern exists because a throwaway `.venv-test` is how you verify
+  that `requirements.lock` still reproduces the environment.
 - Task tracking lives in `odd/tasks/<feature-name>.md`; run `git status` before assuming a
   file is under version control (new slice packages start untracked).
